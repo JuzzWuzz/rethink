@@ -40,8 +40,6 @@ describe(MODEL, () => {
         assert.equal(props.freezer_setpoint, -17)
         assert.equal(props.water_filter_age, 6)
         assert.equal(props.water_filter_replacement, 'ON')
-        assert.equal(props.fridge_door, 'None')
-        assert.equal(props.freezer_door, 'None')
         thinq.emit('data', buf(FRIDGE_2))
         assert.equal(props.fridge_setpoint, 2)
         thinq.emit('data', buf(COOL_ON))
@@ -54,6 +52,42 @@ describe(MODEL, () => {
         assert.equal(props.express_freeze, 'OFF')
         thinq.emit('data', buf(FREEZER_18))
         assert.equal(props.freezer_setpoint, -18)
+    })
+
+    test('a fresh all-closed status initializes the two channels', () => {
+        const { thinq, props } = makeDevice()
+        thinq.emit('data', buf('aa0810a800003fbb'))
+        assert.equal(props.fridge_door, 'None')
+        assert.equal(props.freezer_door, 'None')
+
+        thinq.emit('data', buf(FRIDGE_2))
+        assert.equal(props.fridge_door, 'OFF')
+        assert.equal(props.freezer_door, 'OFF')
+
+        thinq.emit('data', buf('aa0810a8010139bb'))
+        thinq.emit('data', buf(FRIDGE_2))
+        assert.equal(props.fridge_door, 'ON')
+        assert.equal(props.freezer_door, 'OFF')
+    })
+
+    test('aggregate open and unverified values cannot initialize or overwrite channels', () => {
+        const { thinq, props } = makeDevice()
+        const sample = buf(FRIDGE_2).subarray(31, 58)
+        for (const aggregate of [0x01, 0x02, 0xff]) {
+            sample[7] = aggregate
+            thinq.emit('data', AABBDevice.frame(Buffer.concat([buf('10eb'), sample])))
+            assert.equal(props.fridge_door, 'None')
+            assert.equal(props.freezer_door, 'None')
+        }
+
+        thinq.emit('data', buf('aa0810a8020138bb'))
+        thinq.emit('data', AABBDevice.frame(Buffer.concat([buf('10eb'), sample])))
+        assert.equal(props.fridge_door, 'None')
+        assert.equal(props.freezer_door, 'ON')
+
+        thinq.emit('data', buf(FRIDGE_2))
+        assert.equal(props.fridge_door, 'OFF')
+        assert.equal(props.freezer_door, 'ON')
     })
 
     test('split doors are independent and unsolicited baseline cannot clear an open door', () => {

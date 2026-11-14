@@ -129,7 +129,12 @@ export default class Device extends AABBDevice {
             'water_filter_replacement',
             filterAge === undefined ? undefined : filterAge >= 6 ? 'ON' : 'OFF',
         )
-        // The status field for door position is aggregate, not the per-channel state.
+        // The aggregate can initialize both channels when all doors are closed. It
+        // cannot identify an open door or override a channel already set by an event.
+        if (status.anyDoorOpen === 0x00) {
+            if (this.publishCache.get('fridge_door') === undefined) this.publishProperty('fridge_door', 'OFF')
+            if (this.publishCache.get('freezer_door') === undefined) this.publishProperty('freezer_door', 'OFF')
+        }
     }
 
     setProperty(property: string, mqttValue: string) {
