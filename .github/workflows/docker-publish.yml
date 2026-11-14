@@ -21,7 +21,7 @@ concurrency:
 
 jobs:
     publish:
-        if: ${{ github.event_name == 'release' || github.event.workflow_run.conclusion == 'success' }}
+        if: ${{ github.repository == 'anszom/rethink' && (github.event_name == 'release' || github.event.workflow_run.conclusion == 'success') }}
         runs-on: ubuntu-latest
         # QEMU-emulated multi-arch builds have been observed hanging for hours (see run
         # 32424842349, cancelled after 6h) instead of failing outright - cap it so a stuck
