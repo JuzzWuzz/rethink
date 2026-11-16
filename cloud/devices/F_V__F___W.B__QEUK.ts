@@ -32,7 +32,7 @@ const COURSES = Enum.of({
     'Easy Care': 0x02,
     'Allergy Care': 0x2d,
     'Steam Refresh': 0x0d,
-    'Download Cycle (Dry 30)': [],
+    'Download Cycle': [],
     'Tub Clean': 0x12,
     'Wash+Dry': 0x13,
     'Dry Only': [],
@@ -55,10 +55,20 @@ const DRY_MODES = Enum.of({
 const ERRORS = Enum.of({ OK: 0x00, 'Door open error (dE1)': 0x02 })
 
 function courseName(record: Buffer) {
-    if (record[7] !== 0x18) return COURSES.map(record[7])
-    // Both Dry Only and the tested Dry 30 download report 0x18. Only classify observed signatures.
-    if (record[22] === 0x43 && record[13] === 0x03 && record[20] === 0x01) return 'Download Cycle (Dry 30)'
-    if (record[22] === 0x00 && DRY_MODES.map(record[13]) && record[13] !== 0x00) return 'Dry Only'
+    const course = record[7]
+    const dryMode = record[13]
+    const activeDownload = record[22]
+    // Only the observed active signatures identify the slot. Byte 25 can retain a saved
+    // download on other dial positions, and the course code itself can match a native programme.
+    if (
+        (course === 0x17 && activeDownload === 0x79) ||
+        (course === 0x18 &&
+            ((activeDownload === 0x43 && dryMode === 0x03) || (activeDownload === 0x44 && dryMode === 0x04)))
+    ) {
+        return 'Download Cycle'
+    }
+    if (course !== 0x18) return COURSES.map(course)
+    if (activeDownload === 0x00 && dryMode !== 0x00 && DRY_MODES.map(dryMode)) return 'Dry Only'
     return undefined
 }
 

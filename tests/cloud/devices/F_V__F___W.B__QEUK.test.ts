@@ -193,7 +193,7 @@ test('child lock is independent of the door lock', () => {
     }
 })
 
-test('reads the panel-verified courses and disambiguates only verified Dry Only and Dry 30 Download signatures', () => {
+test('reads the panel-verified native courses', () => {
     const { dev, ha } = setup()
     const record = Buffer.alloc(39)
     record[2] = 1 // Standby
@@ -216,21 +216,41 @@ test('reads the panel-verified courses and disambiguates only verified Dry Only 
         dev.processStatus(record)
         assert.equal(properties.course, label)
     }
-    record[7] = 0x18
-    record[13] = 0x02
-    dev.processStatus(record)
-    assert.equal(properties.course, 'Dry Only')
-    record[13] = 0x03
-    record[20] = 0x01
-    record[22] = 0x43
-    dev.processStatus(record)
-    assert.equal(properties.course, 'Download Cycle (Dry 30)')
-    record[13] = 0x04
-    dev.processStatus(record)
-    assert.equal(properties.course, 'None')
-    record[22] = 0xfe
-    dev.processStatus(record)
-    assert.equal(properties.course, 'None')
+})
+
+test('uses one Download Cycle label for observed selections and ignores the saved marker alone', () => {
+    const { dev, ha } = setup()
+    const record = Buffer.alloc(39)
+    record[2] = 1 // Standby
+    const properties = ha.devices[ID].properties
+    for (const [course, dryMode, activeDownload, savedDownload, expected] of [
+        [0x18, 0x03, 0x43, 0x43, 'Download Cycle'], // Download Dry 30
+        [0x18, 0x04, 0x44, 0x44, 'Download Cycle'], // Download Dry 60
+        [0x17, 0x00, 0x79, 0x79, 'Download Cycle'], // Download Drain
+        [0x18, 0x04, 0x00, 0x44, 'Dry Only'], // Same 60-minute selection in native Dry Only
+        [0x18, 0x03, 0x00, 0x43, 'Dry Only'],
+        [0x18, 0x02, 0x00, 0x00, 'Dry Only'],
+        [0x12, 0x00, 0x00, 0x79, 'Tub Clean'],
+        [0x12, 0x00, 0x00, 0x44, 'Tub Clean'],
+        [0x17, 0x00, 0x00, 0x79, 'None'], // Unverified native 0x17
+        [0x18, 0x04, 0x43, 0x43, 'None'], // Mismatched active marker and dry selection
+        [0x18, 0x04, 0xfe, 0x44, 'None'], // Unverified active marker
+    ] as const) {
+        record[7] = course
+        record[13] = dryMode
+        record[20] = dryMode === 0x03 || dryMode === 0x04 ? 0x01 : 0x00
+        record[22] = activeDownload
+        record[25] = savedDownload
+        dev.processStatus(record)
+        assert.equal(properties.course, expected)
+    }
+    const discovery = ha.devices[ID].config!.components.course
+    const options = 'options' in discovery ? discovery.options : undefined
+    assert.ok(Array.isArray(options))
+    assert.deepEqual(
+        options.filter((option: unknown) => typeof option === 'string' && option.startsWith('Download')),
+        ['Download Cycle'],
+    )
 })
 
 test('publishes the verified dry selections and only the Standby Delay End setting, not a countdown', () => {
