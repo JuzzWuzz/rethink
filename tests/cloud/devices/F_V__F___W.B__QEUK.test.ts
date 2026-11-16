@@ -192,3 +192,119 @@ test('child lock is independent of the door lock', () => {
         assert.equal(ha.devices[ID].properties.door_lock, door)
     }
 })
+
+test('reads the panel-verified courses and disambiguates only verified Dry Only and Dry 30 Download signatures', () => {
+    const { dev, ha } = setup()
+    const record = Buffer.alloc(39)
+    record[2] = 1 // Standby
+    const properties = ha.devices[ID].properties
+    for (const [value, label] of [
+        [0x01, 'Cotton'],
+        [0x04, 'Cotton+'],
+        [0x31, 'TurboWash 39'],
+        [0x07, 'Mixed Fabric'],
+        [0x02, 'Easy Care'],
+        [0x2d, 'Allergy Care'],
+        [0x0d, 'Steam Refresh'],
+        [0x12, 'Tub Clean'],
+        [0x13, 'Wash+Dry'],
+        [0x0c, 'Speed 14'],
+        [0x1b, 'Hand/Wool'],
+        [0x20, 'Delicates'],
+    ] as const) {
+        record[7] = value
+        dev.processStatus(record)
+        assert.equal(properties.course, label)
+    }
+    record[7] = 0x18
+    record[13] = 0x02
+    dev.processStatus(record)
+    assert.equal(properties.course, 'Dry Only')
+    record[13] = 0x03
+    record[20] = 0x01
+    record[22] = 0x43
+    dev.processStatus(record)
+    assert.equal(properties.course, 'Download Cycle (Dry 30)')
+    record[13] = 0x04
+    dev.processStatus(record)
+    assert.equal(properties.course, 'None')
+    record[22] = 0xfe
+    dev.processStatus(record)
+    assert.equal(properties.course, 'None')
+})
+
+test('publishes the verified dry selections and only the Standby Delay End setting, not a countdown', () => {
+    const { dev, ha } = setup()
+    const record = Buffer.alloc(39)
+    record[2] = 1
+    record[7] = 0x18
+    const properties = ha.devices[ID].properties
+    for (const [mode, expected] of [
+        [0x02, 'Normal'],
+        [0x03, '30 min'],
+        [0x04, '60 min'],
+        [0x06, '120 min'],
+        [0x0a, 'Iron Dry'],
+        [0x0b, 'Low Temperature'],
+        [0x0c, 'Normal Eco'],
+        [0xfe, 'None'],
+    ] as const) {
+        record[13] = mode
+        dev.processStatus(record)
+        assert.equal(properties.drying_mode, expected)
+    }
+    record[7] = 1 // Cotton
+    for (const selection of [0, ...Array.from({ length: 17 }, (_, i) => i + 3), 1, 2, 20, 0xff]) {
+        record[14] = selection
+        dev.processStatus(record)
+        assert.equal(
+            properties.delay_end_setting,
+            selection === 0 || (selection >= 3 && selection <= 19) ? selection : 'None',
+        )
+        assert.equal(properties.remaining_time, 'None')
+    }
+    record[14] = 3
+    record[2] = 3 // Not a verified Standby selection
+    dev.processStatus(record)
+    assert.equal(properties.delay_end_setting, 'None')
+    assert.equal(properties.remaining_time, 'None')
+    record[2] = 0
+    record[13] = 2
+    dev.processStatus(record)
+    assert.equal(properties.drying_mode, 'None')
+})
+
+test('reports panel Remote Start separately from the lock and decodes the observed dE1 error', () => {
+    const { dev, ha } = setup()
+    const record = Buffer.alloc(39)
+    record[2] = 1
+    const properties = ha.devices[ID].properties
+    for (const [flags, armed, lock] of [
+        [0x00, 'OFF', 'ON'],
+        [0x02, 'ON', 'ON'],
+        [0x42, 'ON', 'OFF'],
+        [0x40, 'OFF', 'OFF'],
+        [0x00, 'OFF', 'ON'],
+    ] as const) {
+        record[17] = flags
+        dev.processStatus(record)
+        assert.equal(properties.remote_start, armed)
+        assert.equal(properties.door_lock, lock)
+    }
+    record[2] = 0x12
+    record[8] = 0x02
+    dev.processStatus(record)
+    assert.equal(properties.status, 'Error')
+    assert.equal(properties.error, 'ON')
+    assert.equal(properties.error_message, 'Door open error (dE1)')
+    record[8] = 0xfe
+    dev.processStatus(record)
+    assert.equal(properties.error, 'ON')
+    assert.equal(properties.error_message, 'None')
+    record[2] = 1
+    record[8] = 0
+    dev.processStatus(record)
+    assert.equal(properties.status, 'Standby')
+    assert.equal(properties.error, 'OFF')
+    assert.equal(properties.error_message, 'OK')
+})
