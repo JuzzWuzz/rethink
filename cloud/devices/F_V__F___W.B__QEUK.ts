@@ -9,16 +9,20 @@ import { allowExtendedType } from '@/util/casting'
 
 const OFF = 0
 const STANDBY = 1
+const DELAY_SET = 3
+const DETECTING = 4
+const SPINNING = 8
 const END = 10
-const ACTIVE_CYCLE_STATES = new Set([4, 6, 7, 8])
+const ACTIVE_CYCLE_STATES = new Set([DETECTING, 6, 7, SPINNING])
 
 const STATUS = Enum.of({
     Off: OFF,
     Standby: STANDBY,
-    Detecting: 4,
+    'Delay Set': DELAY_SET,
+    'Detecting Load Level': DETECTING,
     Washing: 6,
     Rinsing: 7,
-    Spinning: 8,
+    Spinning: SPINNING,
     End: END,
     Error: 0x12,
 })
@@ -39,6 +43,7 @@ const COURSES = Enum.of({
     'Speed 14': 0x0c,
     'Hand/Wool': 0x1b,
     Delicates: 0x20,
+    'Spin Only': [],
 })
 
 const DRY_MODES = Enum.of({
@@ -51,6 +56,8 @@ const DRY_MODES = Enum.of({
     'Low Temperature': 0x0b,
     'Normal Eco': 0x0c,
 })
+
+const RINSE_MODES = Enum.of({ 'Not selected': 0x00, Normal: 0x01, 'Rinse+': 0x02 })
 
 const ERRORS = Enum.of({ OK: 0x00, 'Door open error (dE1)': 0x02 })
 
@@ -67,12 +74,28 @@ function courseName(record: Buffer) {
     ) {
         return 'Download Cycle'
     }
+    // Spin Only shares 0x01 with Cotton. A normal wash can clear rinse/temperature in its
+    // final spin, so require a direct Standby -> Spinning transition for active reports.
+    const state = record[2]
+    if (
+        course === 0x01 &&
+        (state === STANDBY || (state === SPINNING && record[21] === STANDBY)) &&
+        activeDownload === 0x00 &&
+        record[10] > 0 &&
+        SPINS.map(record[10]) !== undefined &&
+        record[11] === 0x00 &&
+        record[12] === 0x00 &&
+        dryMode === 0x00
+    ) {
+        return 'Spin Only'
+    }
     if (course !== 0x18) return COURSES.map(course)
     if (activeDownload === 0x00 && dryMode !== 0x00 && DRY_MODES.map(dryMode)) return 'Dry Only'
     return undefined
 }
 
 export default class Device extends AABBDevice {
+    private spinOnlyRun = false
     private sawActiveCycle = false
     private runCompleted = false
 
@@ -99,14 +122,17 @@ export default class Device extends AABBDevice {
                 ...HADevice.config(meta, { name: 'LG Washer' }),
                 components: {
                     status: enumeration('Status', 'status', STATUS.options),
+                    previous_status: enumeration('Previous status', 'previous_status', STATUS.options),
                     course: enumeration('Course', 'course', COURSES.options),
                     temp: enumeration('Water Temperature', 'temp', TEMPERATURES.options),
                     spin: enumeration('Spin Speed', 'spin', SPINS.options),
+                    rinse_mode: enumeration('Rinse mode', 'rinse_mode', RINSE_MODES.options),
                     drying_mode: enumeration('Dry mode', 'drying_mode', DRY_MODES.options),
                     delay_end_setting: {
                         ...duration('Delay End setting', 'delay_end_setting'),
                         unit_of_measurement: 'h',
                     },
+                    delay_end_countdown: duration('Delay End countdown', 'delay_end_countdown'),
                     remote_start: {
                         platform: 'binary_sensor',
                         unique_id: '$deviceid-remote_start',
@@ -165,9 +191,11 @@ export default class Device extends AABBDevice {
         const state = record[2]
         // Before starting, idle timer fields can show raw presets not displayed on the panel.
         const cycleActive = ACTIVE_CYCLE_STATES.has(state)
-        const hasCycleTime = cycleActive || state === END
+        const isDelaySet = state === DELAY_SET
+        const hasCycleTime = cycleActive || isDelaySet || state === END
         this.publishProperty('status', STATUS.map(state))
-        this.publishProperty('course', state === OFF ? undefined : courseName(record))
+        this.publishProperty('previous_status', hasCycleTime ? STATUS.map(record[21]) : undefined)
+        this.publishCourse(record)
         // Both are selected programme settings, not measurements.
         this.publishProperty('temp', state === OFF ? undefined : TEMPERATURES.map(record[11]))
         this.publishProperty('spin', state === OFF ? undefined : SPINS.map(record[10]))
@@ -178,17 +206,41 @@ export default class Device extends AABBDevice {
         this.publishProperty('child_lock', record[17] & 0x80 ? 'ON' : 'OFF')
         // HA's lock binary sensor is OFF when locked. End does not itself imply unlocked.
         this.publishProperty('door_lock', record[17] & 0x40 ? 'OFF' : 'ON')
+        this.publishProperty('rinse_mode', state === OFF ? undefined : RINSE_MODES.map(record[12]))
         this.publishProperty('drying_mode', state === OFF ? undefined : DRY_MODES.map(record[13]))
-        // Only the Standby selection was verified; never interpret it as time remaining.
-        const delay = record[14]
+        // The same bytes store the whole-hour preset in Standby but count down in Delay Set.
+        const delayHours = record[14]
+        const delayMinutes = record[15]
+        const countdown = delayHours * 60 + delayMinutes
         this.publishProperty(
             'delay_end_setting',
-            state === STANDBY && record[7] !== 0 && (delay === 0 || (delay >= 3 && delay <= 19)) ? delay : undefined,
+            state === STANDBY &&
+                record[7] !== 0 &&
+                delayMinutes === 0 &&
+                (delayHours === 0 || (delayHours >= 3 && delayHours <= 19))
+                ? delayHours
+                : undefined,
+        )
+        this.publishProperty(
+            'delay_end_countdown',
+            isDelaySet && delayMinutes < 60 && countdown <= 19 * 60 ? countdown : undefined,
         )
         this.publishProperty('remote_start', state !== OFF && record[17] & 0x02 ? 'ON' : 'OFF')
         this.publishProperty('error', state === 0x12 || record[8] !== 0 ? 'ON' : 'OFF')
         this.publishProperty('error_message', ERRORS.map(record[8]))
         this.publishCompletion(state, cycleActive)
+    }
+
+    private publishCourse(record: Buffer) {
+        const state = record[2]
+        const name = state === OFF ? undefined : courseName(record)
+        const continuingSpinOnly =
+            this.spinOnlyRun && record[7] === 0x01 && record[21] === SPINNING && (state === SPINNING || state === END)
+        this.spinOnlyRun = (state === SPINNING && name === 'Spin Only') || continuingSpinOnly
+        // An End-only snapshot can lack every distinguishing setting; don't guess Cotton.
+        const ambiguousEnd =
+            state === END && record[7] === 0x01 && record[21] === SPINNING && !this.sawActiveCycle && !this.runCompleted
+        this.publishProperty('course', this.spinOnlyRun ? 'Spin Only' : ambiguousEnd ? undefined : name)
     }
 
     private publishCompletion(state: number, cycleActive: boolean) {

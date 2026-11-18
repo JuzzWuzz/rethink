@@ -284,7 +284,7 @@ test('publishes the verified dry selections and only the Standby Delay End setti
         assert.equal(properties.remaining_time, 'None')
     }
     record[14] = 3
-    record[2] = 3 // Not a verified Standby selection
+    record[2] = 0x12 // Error, not a Standby selection
     dev.processStatus(record)
     assert.equal(properties.delay_end_setting, 'None')
     assert.equal(properties.remaining_time, 'None')
@@ -327,4 +327,158 @@ test('reports panel Remote Start separately from the lock and decodes the observ
     assert.equal(properties.status, 'Standby')
     assert.equal(properties.error, 'OFF')
     assert.equal(properties.error_message, 'OK')
+})
+
+// Wrapped EC captures from the exact model's physical panel tests.
+const spinOnlySelected = buf(
+    'aaff200a0060009502000100ec004e000001000b000b0100000700000000000000000001000002004300000000001400000000000000000001000c000c0100000900000000000000000001000002004300000000001400000000000000e6a6bb',
+)
+const spinOnlyStarted = buf(
+    'aaff200a006000950c000100ec004e000001000c000c0100000900000000000000000001000002004300000000001400000000000000000008000c000c01000009000000000000022000010100020043000000000001000000000000009675bb',
+)
+const spinOnlyEnd = buf(
+    'aaff200a0060009610000100ec004e0000080001000c010000090000000000004200000101000200430000000000170000000000000000000a0000000c0100000000000000000040000001080002004300000000001700000000008000a491bb',
+)
+const spinOnlyOff = buf(
+    'aaff200a006000961d000100ec004e00000a0000000c01000000000000000000000000010800020043000000000017000000000000000000000000000c01000000000000000000000000010a0002004300000000001700000000000000b236bb',
+)
+const mixedDelayPreset = buf(
+    'aaff200a006000968f000100ec004e00000101210121070003070402000300000001000200000200430000040000000000000000000000000101210121070003070402000300000001000200000200430000040000000000000000c0007c51bb',
+)
+const mixedDelayDetecting = buf(
+    'aaff200a0060009697000100ec004e0000010121012107000307040200030000000100020000020043000004000000000000000040000000040121012107000307040200030000022100010100020043000004000000000000000000006e1fbb',
+)
+const mixedDelayWaiting = buf(
+    'aaff200a00600096ab000100ec004e000004012101210700030704020003000042210001010002004300000400000000000000004000000003011d011d0700030704020003000042210001040002004300000400000000000000000000c2efbb',
+)
+const mixedDelayTick = buf(
+    'aaff200a00600096c0000100ec004e000003011d011d0700030704020003000042210001040002004300000400000000000000000000000003011d011d07000307040200023b0042210001040002004300000400000000000000004000149fbb',
+)
+const mixedDelayToWash = buf(
+    'aaff200a0060009cc6000100ec004e000003011d011d0700030704020001360042210001040002004300000400000b00000000000000000006011d011d0700030704020000000042210001030002004300000400000b000000000000007b04bb',
+)
+const handWoolEnd = buf(
+    'aaff200a00600094f2000100ec004e00000a000000241b0000000000000000000000000108000100430000030000140000000000000000000a000000241b00000000000000000000000001080001004300000300001400000000004000fda8bb',
+)
+
+test('distinguishes manual Spin Only from Cotton and never infers it from the power-on placeholder', () => {
+    const { update, dev, ha } = setup()
+    const spinning = update(spinOnlyStarted)
+    assert.equal(update(spinOnlySelected).course, 'Spin Only')
+    assert.equal(update(spinOnlySelected).remaining_time, 'None')
+    assert.equal(spinning.status, 'Spinning')
+    assert.equal(spinning.course, 'Spin Only')
+    assert.equal(spinning.spin, '1200 rpm')
+    assert.equal(spinning.remaining_time, 12)
+    assert.equal(spinning.previous_status, 'Standby')
+    const record = Buffer.from(spinOnlyStarted.subarray(54, 93))
+    record[21] = 7 // Ordinary mid-cycle Cotton spin followed rinsing, not standby.
+    dev.processStatus(record)
+    assert.equal(ha.devices[ID].properties.course, 'Cotton')
+    record[2] = 1
+    record[11] = 0x01 // Cotton Cold is a selected temperature, distinct from unset.
+    dev.processStatus(record)
+    assert.equal(ha.devices[ID].properties.course, 'Cotton')
+    record[11] = 0
+    record[10] = 0
+    dev.processStatus(record)
+    assert.notEqual(ha.devices[ID].properties.course, 'Spin Only')
+    record[7] = 0 // Power-on before a programme or spin selection.
+    dev.processStatus(record)
+    assert.equal(ha.devices[ID].properties.course, 'None')
+})
+
+test('retains Spin Only only after verifying the run, then resumes normal Cotton classification', () => {
+    const { update, dev, ha } = setup()
+    assert.equal(update(spinOnlyEnd).course, 'None') // Reconnected at End; cannot name the run.
+    assert.equal(update(spinOnlyStarted).course, 'Spin Only')
+    const end = update(spinOnlyEnd)
+    assert.equal(end.course, 'Spin Only')
+    assert.equal(end.status, 'End')
+    assert.equal(end.remaining_time, 0)
+    assert.equal(end.initial_time, 12)
+    assert.equal(end.run_completed, 'ON')
+    assert.equal(update(spinOnlyEnd).course, 'Spin Only')
+    assert.equal(update(spinOnlyOff).course, 'None')
+    const cotton = Buffer.from(spinOnlyStarted.subarray(54, 93))
+    cotton[2] = 6
+    cotton[11] = 4
+    cotton[12] = 1
+    dev.processStatus(cotton)
+    assert.equal(ha.devices[ID].properties.course, 'Cotton')
+    cotton[2] = 8
+    cotton[21] = 7
+    cotton[11] = 0
+    cotton[12] = 0
+    dev.processStatus(cotton)
+    assert.equal(ha.devices[ID].properties.course, 'Cotton')
+    assert.equal(update(spinOnlyEnd).course, 'Cotton') // Same ambiguous bytes, now with known run history.
+    assert.equal(update(spinOnlyEnd).course, 'Cotton')
+})
+
+test('replays the wrapped Delay End sequence and keeps all three timers separate', () => {
+    const { update, dev, ha } = setup()
+    const preset = update(mixedDelayPreset)
+    assert.equal(preset.delay_end_setting, 3)
+    assert.equal(preset.delay_end_countdown, 'None')
+    assert.equal(preset.remaining_time, 'None')
+    assert.equal(preset.rinse_mode, 'Rinse+')
+
+    const detecting = update(mixedDelayDetecting)
+    assert.equal(detecting.status, 'Detecting Load Level')
+    assert.equal(detecting.delay_end_countdown, 'None')
+    assert.equal(detecting.delay_end_setting, 'None')
+
+    const waiting = update(mixedDelayWaiting)
+    assert.equal(waiting.course, 'Mixed Fabric')
+    assert.equal(waiting.status, 'Delay Set')
+    assert.equal(waiting.previous_status, 'Detecting Load Level')
+    assert.equal(waiting.delay_end_countdown, 180)
+    assert.equal(waiting.delay_end_setting, 'None')
+    assert.equal(waiting.initial_time, 89)
+    assert.equal(waiting.remaining_time, 89)
+    assert.equal(waiting.rinse_mode, 'Rinse+')
+    assert.equal(waiting.run_completed, 'OFF')
+
+    const tick = update(mixedDelayTick)
+    assert.equal(tick.delay_end_countdown, 179)
+    assert.equal(tick.initial_time, 89)
+    assert.equal(tick.remaining_time, 89)
+
+    const transition = update(mixedDelayToWash)
+    assert.equal(transition.status, 'Washing')
+    assert.equal(transition.previous_status, 'Delay Set')
+    assert.equal(transition.delay_end_countdown, 'None')
+    assert.equal(transition.initial_time, 89)
+    assert.equal(transition.remaining_time, 89)
+    assert.equal(transition.rinse_mode, 'Rinse+')
+
+    const record = Buffer.from(mixedDelayTick.subarray(54, 93))
+    record[15] = 60 // Invalid minutes must not leak through as a normalized value.
+    dev.processStatus(record)
+    assert.equal(ha.devices[ID].properties.delay_end_countdown, 'None')
+    record[15] = 59
+    record[2] = 6 // Even if a wash frame still carries the old countdown, it is inactive.
+    dev.processStatus(record)
+    assert.equal(ha.devices[ID].properties.delay_end_countdown, 'None')
+    assert.equal(ha.devices[ID].properties.remaining_time, 89)
+
+    const ended = update(handWoolEnd)
+    assert.equal(ended.remaining_time, 0)
+    assert.equal(ended.initial_time, 36)
+    assert.equal(ended.delay_end_countdown, 'None')
+    assert.equal(update(off).delay_end_countdown, 'None')
+    assert.equal(update(off).rinse_mode, 'None')
+})
+
+test('explicitly clears a retained delay countdown when a fresh driver first receives Washing', () => {
+    const { update, dev, ha } = setup()
+    // Simulate the previous driver's retained value surviving this driver's restart.
+    ha.devices[ID].properties.delay_end_countdown = 114
+    assert.equal(dev.publishCache.has('delay_end_countdown'), false)
+    const state = update(mixedDelayToWash)
+    assert.equal(state.status, 'Washing')
+    assert.equal(state.delay_end_countdown, 'None')
+    assert.equal(dev.publishCache.has('delay_end_countdown'), true)
+    assert.equal(dev.publishCache.get('delay_end_countdown'), undefined)
 })
